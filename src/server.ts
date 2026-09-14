@@ -29,7 +29,7 @@ const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 const resend = new Resend(resendApiKey);
-const emailFrom = "02Growth <onboarding@resend.dev>";
+const emailFrom = "02Growth <hello@02growth.online>";
 const adminRecipients = ["teslimshehu17@gmail.com", "teslimnysc17@gmail.com"];
 
 const app = Fastify({
