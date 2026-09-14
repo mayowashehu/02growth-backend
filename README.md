@@ -10,7 +10,7 @@ npm install
 Copy-Item .env.example .env
 ```
 
-Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env`. The service uses the service-role key only on the server, so it must never be exposed to the frontend.
+Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `RESEND_API_KEY` in `.env`. The service uses the service-role key and Resend key only on the server, so they must never be exposed to the frontend.
 
 ## Run
 
