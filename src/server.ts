@@ -4,18 +4,14 @@ import Fastify, {
 } from "fastify";
 import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { readFile } from "node:fs/promises";
+import { timingSafeEqual } from "node:crypto";
+import path from "node:path";
 import {
   diagnosisSchema,
   type DiagnosisSubmission,
 } from "./schema.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const publicDir = path.resolve(__dirname, "..", "public");
 
 const port = Number(process.env.PORT ?? 4000);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -57,6 +53,18 @@ if (!resendApiKey) {
   throw new Error("RESEND_API_KEY is required");
 }
 
+const adminApiToken: string = (() => {
+  const value = process.env.ADMIN_API_TOKEN;
+
+  if (!value || value.length < 16) {
+    throw new Error(
+      "ADMIN_API_TOKEN is required and must be at least 16 characters. Generate one with `openssl rand -hex 32`.",
+    );
+  }
+
+  return value;
+})();
+
 const supabase = createClient(
   supabaseUrl,
   supabaseServiceRoleKey,
@@ -72,6 +80,12 @@ const resend = new Resend(resendApiKey);
 
 const emailFrom =
   "02Growth <hello@02growth.online>";
+
+// Matches the site's font-mono uppercase micro-labels (record tags, field
+// labels, "VERIFIED"). Falls back gracefully where IBM Plex Mono isn't
+// available to the mail client.
+const MONO_STACK =
+  "'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
 
 const DEFAULT_ADMIN_EMAILS = [
   "teslimshehu17@gmail.com",
@@ -93,85 +107,43 @@ const CASE_FILE_ALLOWLIST: Record<string, string> = {
   "unified-proof": "02Growth Lab — Track Record",
 };
 
-const CASE_FILE_LIBRARY: Record<
-  string,
-  {
-    name: string;
-    files: {
-      filename: string;
-      label: string;
-    }[];
-  }
-> = {
-  "ats-funded": {
-    name: "ATS Funded × 02Growth Lab",
-    files: [
-      {
-        filename: "02Growth_ATSFunded_CaseStudy.pdf",
-        label: "ATS Funded case study",
-      },
-    ],
-  },
-  traderlab: {
-    name: "TraderLab × 02Growth Lab",
-    files: [
-      {
-        filename: "02Growth_TraderLab-CaseStudy.pdf",
-        label: "TraderLab case study",
-      },
-    ],
-  },
-  "unified-proof": {
-    name: "02Growth Lab — Track Record",
-    files: [
-      {
-        filename: "02Growth_ProofOfWork_Portfolio.pdf",
-        label: "Proof of work portfolio",
-      },
-    ],
-  },
-};
-
 function resolveCaseName(caseId: string): string | null {
   return CASE_FILE_ALLOWLIST[caseId] ?? null;
 }
 
-function getCaseFileConfig(
-  caseId: string,
-): (typeof CASE_FILE_LIBRARY)[string] | null {
-  return CASE_FILE_LIBRARY[caseId] ?? null;
+// The PDFs are never served statically and never sit inside the frontend
+// bundle or a "public" directory — this path is only ever read from disk,
+// server-side, by the /api/admin/send-case-file handler below.
+const CASE_FILE_DIR =
+  process.env.CASE_FILE_DIR ??
+  path.join(process.cwd(), "private", "case-files");
+
+const CASE_FILE_PDFS: Record<string, string> = {
+  "ats-funded": "ats-funded.pdf",
+  traderlab: "traderlab.pdf",
+  "unified-proof": "unified-proof.pdf",
+};
+
+function resolveCaseFilePath(caseId: string): string | null {
+  const filename = CASE_FILE_PDFS[caseId];
+  return filename ? path.join(CASE_FILE_DIR, filename) : null;
 }
 
-async function getCaseFileAttachments(
-  caseId: string,
-): Promise<
-  {
-    filename: string;
-    content: string;
-  }[]
-> {
-  const config = getCaseFileConfig(caseId);
-
-  if (!config?.files.length) {
-    return [];
+function isValidAdminToken(candidate: unknown): boolean {
+  if (typeof candidate !== "string" || candidate.length === 0) {
+    return false;
   }
 
-  const attachments = await Promise.all(
-    config.files.map(async ({ filename }) => {
-      const filePath = path.join(
-        publicDir,
-        filename,
-      );
-      const fileBuffer = await readFile(filePath);
+  const expected = Buffer.from(adminApiToken);
+  const actual = Buffer.from(candidate);
 
-      return {
-        filename,
-        content: fileBuffer.toString("base64"),
-      };
-    }),
-  );
+  // Buffers must be equal length for timingSafeEqual; a length mismatch is
+  // simply "not valid" rather than an error.
+  if (expected.length !== actual.length) {
+    return false;
+  }
 
-  return attachments;
+  return timingSafeEqual(expected, actual);
 }
 
 const app = Fastify({
@@ -250,11 +222,11 @@ function emailShell(content: string): string {
   >
   <meta
     name="color-scheme"
-    content="light"
+    content="dark"
   >
   <meta
     name="supported-color-schemes"
-    content="light"
+    content="dark"
   >
   <title>02Growth</title>
 </head>
@@ -263,8 +235,8 @@ function emailShell(content: string): string {
   style="
     margin:0;
     padding:0;
-    background:#0a0a0a;
-    color:#f3eee3;
+    background:#0A0A0A;
+    color:#F3EEE3;
     font-family:Arial,Helvetica,sans-serif;
     -webkit-font-smoothing:antialiased;
   "
@@ -275,7 +247,7 @@ function emailShell(content: string): string {
     cellpadding="0"
     cellspacing="0"
     border="0"
-    style="width:100%;background:#0a0a0a;"
+    style="width:100%;background:#0A0A0A;"
   >
     <tr>
       <td
@@ -291,7 +263,7 @@ function emailShell(content: string): string {
           style="
             width:100%;
             max-width:680px;
-            background:#111111;
+            background:#121212;
             border:1px solid rgba(255,255,255,0.10);
           "
         >
@@ -310,7 +282,7 @@ function emailShell(content: string): string {
             <td
               style="
                 padding:18px 6px 0;
-                color:#9a9a9a;
+                color:#9A9A9A;
                 font-size:11px;
                 line-height:1.5;
                 text-align:center;
@@ -343,12 +315,13 @@ function sectionTitle(
         <div
           style="
             margin-bottom:6px;
-            color:#9a9a9a;
+            color:#9A9A9A;
             font-size:10px;
             line-height:1.4;
             font-weight:700;
             letter-spacing:1.4px;
             text-transform:uppercase;
+            font-family:${MONO_STACK};
           "
         >
           ${escapeHtml(eyebrow)}
@@ -356,7 +329,7 @@ function sectionTitle(
 
         <div
           style="
-            color:#f3eee3;
+            color:#F3EEE3;
             font-size:17px;
             line-height:1.4;
             font-weight:700;
@@ -378,7 +351,7 @@ function infoRow(
       <td
         style="
           padding:13px 0;
-          border-top:1px solid rgba(255,255,255,0.08);
+          border-top:1px solid rgba(255,255,255,0.10);
           vertical-align:top;
         "
       >
@@ -396,12 +369,13 @@ function infoRow(
               style="
                 width:34%;
                 padding-right:18px;
-                color:#9a9a9a;
+                color:#9A9A9A;
                 font-size:10px;
                 line-height:1.5;
                 font-weight:700;
                 letter-spacing:1px;
                 text-transform:uppercase;
+                font-family:${MONO_STACK};
               "
             >
               ${escapeHtml(label)}
@@ -410,7 +384,7 @@ function infoRow(
             <td
               valign="top"
               style="
-                color:#f3eee3;
+                color:#D8D2C4;
                 font-size:14px;
                 line-height:1.65;
                 overflow-wrap:anywhere;
@@ -441,7 +415,7 @@ function buildAdminEmail(
           display:inline-block;
           padding:11px 16px;
           background:#268C28;
-          color:#0a0a0a;
+          color:#0A0A0A;
           text-decoration:none;
           font-size:13px;
           font-weight:700;
@@ -457,7 +431,7 @@ function buildAdminEmail(
       <td
         style="
           padding:30px 32px 26px;
-          background:#0a0a0a;
+          background:#0A0A0A;
           border-bottom:3px solid #268C28;
         "
       >
@@ -478,6 +452,7 @@ function buildAdminEmail(
                   font-weight:700;
                   letter-spacing:1.8px;
                   text-transform:uppercase;
+                  font-family:${MONO_STACK};
                 "
               >
                 02Growth · Diagnostic Intake
@@ -486,7 +461,7 @@ function buildAdminEmail(
               <div
                 style="
                   margin-top:10px;
-                  color:#f3eee3;
+                  color:#F3EEE3;
                   font-size:26px;
                   line-height:1.25;
                   font-weight:700;
@@ -498,7 +473,7 @@ function buildAdminEmail(
               <div
                 style="
                   margin-top:10px;
-                  color:#9a9a9a;
+                  color:#9A9A9A;
                   font-size:14px;
                   line-height:1.6;
                 "
@@ -519,18 +494,19 @@ function buildAdminEmail(
       <td
         style="
           padding:26px 32px;
-          background:#121212;
-          border-bottom:1px solid rgba(255,255,255,0.08);
+          background:#161616;
+          border-bottom:1px solid rgba(255,255,255,0.10);
         "
       >
         <div
           style="
             margin-bottom:8px;
-            color:#9a9a9a;
+            color:#9A9A9A;
             font-size:10px;
             font-weight:700;
             letter-spacing:1.3px;
             text-transform:uppercase;
+            font-family:${MONO_STACK};
           "
         >
           First read
@@ -538,7 +514,7 @@ function buildAdminEmail(
 
         <div
           style="
-            color:#f3eee3;
+            color:#F3EEE3;
             font-size:18px;
             line-height:1.55;
             font-weight:700;
@@ -550,7 +526,7 @@ function buildAdminEmail(
         <div
           style="
             margin-top:8px;
-            color:#d8d3ca;
+            color:#9A9A9A;
             font-size:13px;
             line-height:1.65;
           "
@@ -704,7 +680,7 @@ function buildAdminEmail(
               <div
                 style="
                   padding-top:22px;
-                  border-top:1px solid #eceeef;
+                  border-top:1px solid rgba(255,255,255,0.10);
                 "
               >
                 ${contactAction}
@@ -719,13 +695,13 @@ function buildAdminEmail(
       <td
         style="
           padding:18px 32px;
-          background:#0a0a0a;
-          color:#d8d3ca;
+          background:#0A0A0A;
+          color:#9A9A9A;
           font-size:11px;
           line-height:1.6;
         "
       >
-        <strong style="color:#f3eee3;">
+        <strong style="color:#F3EEE3;">
           Internal rule:
         </strong>
         treat this submission as signal, not diagnosis.
@@ -749,7 +725,7 @@ function buildClientEmail(
       <td
         style="
           padding:30px 32px 26px;
-          background:#0a0a0a;
+          background:#0A0A0A;
           border-bottom:3px solid #268C28;
         "
       >
@@ -761,6 +737,7 @@ function buildClientEmail(
             font-weight:700;
             letter-spacing:1.8px;
             text-transform:uppercase;
+            font-family:${MONO_STACK};
           "
         >
           02Growth
@@ -769,7 +746,7 @@ function buildClientEmail(
         <div
           style="
             margin-top:10px;
-            color:#f3eee3;
+            color:#F3EEE3;
             font-size:25px;
             line-height:1.25;
             font-weight:700;
@@ -789,7 +766,7 @@ function buildClientEmail(
         <p
           style="
             margin:0 0 18px;
-            color:#f3eee3;
+            color:#F3EEE3;
             font-size:15px;
             line-height:1.7;
           "
@@ -800,7 +777,7 @@ function buildClientEmail(
         <p
           style="
             margin:0 0 18px;
-            color:#d8d3ca;
+            color:#D8D2C4;
             font-size:15px;
             line-height:1.75;
           "
@@ -812,7 +789,7 @@ function buildClientEmail(
         <p
           style="
             margin:0 0 26px;
-            color:#d8d3ca;
+            color:#D8D2C4;
             font-size:15px;
             line-height:1.75;
           "
@@ -832,8 +809,8 @@ function buildClientEmail(
           style="
             width:100%;
             margin:0 0 28px;
-            background:#121212;
-            border:1px solid rgba(255,255,255,0.08);
+            background:#161616;
+            border:1px solid rgba(255,255,255,0.10);
           "
         >
           <tr>
@@ -844,11 +821,12 @@ function buildClientEmail(
             >
               <div
                 style="
-                  color:#9a9a9a;
+                  color:#9A9A9A;
                   font-size:10px;
                   font-weight:700;
                   letter-spacing:1.2px;
                   text-transform:uppercase;
+                  font-family:${MONO_STACK};
                 "
               >
                 What happens next
@@ -857,12 +835,12 @@ function buildClientEmail(
               <div
                 style="
                   margin-top:14px;
-                  color:#f3eee3;
+                  color:#D8D2C4;
                   font-size:14px;
                   line-height:1.75;
                 "
               >
-                <strong style="color:#268C28;">
+                <strong style="color:#F3EEE3;">
                   1.
                 </strong>
                 We review the project and the surfaces
@@ -872,12 +850,12 @@ function buildClientEmail(
               <div
                 style="
                   margin-top:10px;
-                  color:#f3eee3;
+                  color:#D8D2C4;
                   font-size:14px;
                   line-height:1.75;
                 "
               >
-                <strong style="color:#268C28;">
+                <strong style="color:#F3EEE3;">
                   2.
                 </strong>
                 You will hear from us within 24 hours.
@@ -886,12 +864,12 @@ function buildClientEmail(
               <div
                 style="
                   margin-top:10px;
-                  color:#f3eee3;
+                  color:#D8D2C4;
                   font-size:14px;
                   line-height:1.75;
                 "
               >
-                <strong style="color:#268C28;">
+                <strong style="color:#F3EEE3;">
                   3.
                 </strong>
                 If the project is a fit, we will explain
@@ -905,7 +883,7 @@ function buildClientEmail(
         <p
           style="
             margin:0 0 26px;
-            color:#d8d3ca;
+            color:#D8D2C4;
             font-size:14px;
             line-height:1.75;
           "
@@ -918,13 +896,13 @@ function buildClientEmail(
         <div
           style="
             padding-top:22px;
-            border-top:1px solid rgba(255,255,255,0.08);
+            border-top:1px solid rgba(255,255,255,0.10);
           "
         >
           <p
             style="
               margin:0;
-              color:#f3eee3;
+              color:#F3EEE3;
               font-size:14px;
               line-height:1.65;
             "
@@ -932,7 +910,7 @@ function buildClientEmail(
             02Growth<br>
             <span
               style="
-                color:#9a9a9a;
+                color:#9A9A9A;
                 font-size:12px;
               "
             >
@@ -971,21 +949,22 @@ Diagnose before you prescribe.
 02growth.online`;
 }
 
-function buildProofAccessEmail(
-  name: string,
-  caseName: string,
-  caseId: string,
-): string {
-  const firstName = name.trim().split(/\s+/)[0] || "there";
-  const config = getCaseFileConfig(caseId);
-  const fileLabel = config?.files[0]?.label ?? "case file";
+/* -------------------------------------------------------------------------- */
+/* Case file delivery (admin-triggered)                                      */
+/* -------------------------------------------------------------------------- */
 
-  return emailShell(`
+function buildCaseFileDeliveryEmail(
+  caseName: string,
+  recipientName: string,
+): { html: string; text: string } {
+  const firstName = recipientName.trim().split(/\s+/)[0] || "there";
+
+  const html = emailShell(`
     <tr>
       <td
         style="
           padding:30px 32px 26px;
-          background:#0a0a0a;
+          background:#0A0A0A;
           border-bottom:3px solid #268C28;
         "
       >
@@ -993,123 +972,67 @@ function buildProofAccessEmail(
           style="
             color:#268C28;
             font-size:10px;
+            line-height:1.5;
             font-weight:700;
             letter-spacing:1.8px;
             text-transform:uppercase;
-            line-height:1.5;
+            font-family:${MONO_STACK};
           "
         >
-          02Growth · Case file access
+          02Growth · Case file delivery
         </div>
 
         <div
           style="
             margin-top:10px;
-            color:#f3eee3;
+            color:#F3EEE3;
             font-size:25px;
             line-height:1.25;
             font-weight:700;
           "
         >
-          Access approved for ${escapeHtml(caseName)}
+          Your requested case file
         </div>
       </td>
     </tr>
 
     <tr>
       <td style="padding:32px;">
-        <p style="margin:0 0 18px; color:#f3eee3; font-size:15px; line-height:1.7;">
+        <p style="margin:0 0 18px;color:#F3EEE3;font-size:15px;line-height:1.7;">
           Hi ${escapeHtml(firstName)},
         </p>
 
-        <p style="margin:0 0 18px; color:#d8d3ca; font-size:15px; line-height:1.75;">
-          Your request for the ${escapeHtml(caseName)} case file has been approved.
+        <p style="margin:0 0 18px;color:#D8D2C4;font-size:15px;line-height:1.75;">
+          Attached is the case file for <strong style="color:#F3EEE3;">${escapeHtml(caseName)}</strong>, shared privately following your access request.
         </p>
 
-        <p style="margin:0 0 24px; color:#d8d3ca; font-size:15px; line-height:1.75;">
-          The attached PDF includes the relevant proof, context and client-side evidence for this engagement.
+        <p style="margin:0 0 26px;color:#D8D2C4;font-size:15px;line-height:1.75;">
+          This document contains client-sensitive material. Please treat it as confidential and avoid forwarding or posting it publicly.
         </p>
 
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; background:#121212; border:1px solid rgba(255,255,255,0.08);">
-          <tr>
-            <td style="padding:20px 22px;">
-              <div style="color:#9a9a9a; font-size:10px; font-weight:700; letter-spacing:1.2px; text-transform:uppercase;">
-                Included item
-              </div>
-              <div style="margin-top:12px; color:#f3eee3; font-size:14px; line-height:1.7;">
-                ${escapeHtml(fileLabel)}
-              </div>
-            </td>
-          </tr>
-        </table>
-
-        <div style="padding-top:24px; border-top:1px solid rgba(255,255,255,0.08); margin-top:26px;">
-          <p style="margin:0; color:#f3eee3; font-size:14px; line-height:1.65;">
+        <div style="padding-top:22px;border-top:1px solid rgba(255,255,255,0.10);">
+          <p style="margin:0;color:#F3EEE3;font-size:14px;line-height:1.65;">
             02Growth<br>
-            <span style="color:#9a9a9a; font-size:12px;">Diagnose before you prescribe.</span>
+            <span style="color:#9A9A9A;font-size:12px;">
+              Diagnose before you prescribe.
+            </span>
           </p>
         </div>
       </td>
     </tr>
   `);
-}
 
-function buildProofAccessText(
-  name: string,
-  caseName: string,
-): string {
-  const firstName = name.trim().split(/\s+/)[0] || "there";
+  const text = `Hi ${firstName},
 
-  return `Hi ${firstName},
+Attached is the case file for ${caseName}, shared privately following your access request.
 
-Your request for the ${caseName} case file has been approved.
-
-The attached PDF includes the relevant proof, context and client-side evidence for this engagement.
+This document contains client-sensitive material. Please treat it as confidential and avoid forwarding or posting it publicly.
 
 02Growth
 Diagnose before you prescribe.
 02growth.online`;
-}
 
-async function sendCaseFileToRequester({
-  to,
-  name,
-  caseId,
-}: {
-  to: string;
-  name: string;
-  caseId: string;
-}): Promise<void> {
-  const config = getCaseFileConfig(caseId);
-
-  if (!config) {
-    throw new Error("Unknown case ID");
-  }
-
-  const attachments = await getCaseFileAttachments(caseId);
-
-  if (!attachments.length) {
-    throw new Error("No PDF attachments found for this case");
-  }
-
-  await resend.emails.send({
-    from: emailFrom,
-    to,
-    subject: `${config.name} — case file access`,
-    html: buildProofAccessEmail(
-      name,
-      config.name,
-      caseId,
-    ),
-    text: buildProofAccessText(
-      name,
-      config.name,
-    ),
-    attachments: attachments.map((attachment) => ({
-      filename: attachment.filename,
-      content: attachment.content,
-    })),
-  });
+  return { html, text };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1369,7 +1292,7 @@ app.post<{ Body: unknown }>(
         <td
           style="
             padding:30px 32px 26px;
-            background:#0a0a0a;
+            background:#0A0A0A;
             border-bottom:3px solid #268C28;
           "
         >
@@ -1381,6 +1304,7 @@ app.post<{ Body: unknown }>(
               font-weight:700;
               letter-spacing:1.8px;
               text-transform:uppercase;
+              font-family:${MONO_STACK};
             "
           >
             02Growth · Case file access
@@ -1389,7 +1313,7 @@ app.post<{ Body: unknown }>(
           <div
             style="
               margin-top:10px;
-              color:#f3eee3;
+              color:#F3EEE3;
               font-size:26px;
               line-height:1.25;
               font-weight:700;
@@ -1445,70 +1369,331 @@ app.post<{ Body: unknown }>(
   },
 );
 
+/* -------------------------------------------------------------------------- */
+/* Admin: send an approved case file privately                               */
+/* -------------------------------------------------------------------------- */
+
+const sendCaseFileSchema = z.object({
+  caseId: z.string().trim().min(2).max(80),
+  recipientEmail: z.string().trim().email().max(255),
+  recipientName: z.string().trim().min(1).max(120).default("there"),
+});
+
+function checkAdminToken(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  token: unknown,
+): boolean {
+  if (isValidAdminToken(token)) {
+    return true;
+  }
+
+  reply.code(401).send({
+    error: {
+      code: "UNAUTHORIZED",
+      message: "Invalid or missing admin token.",
+    },
+  });
+
+  return false;
+}
+
 app.post<{ Body: unknown }>(
-  "/api/case-file-access/send",
+  "/api/admin/send-case-file",
   async (request, reply) => {
+    if (
+      !checkAdminToken(
+        request,
+        reply,
+        request.headers["x-admin-token"],
+      )
+    ) {
+      return;
+    }
+
     if (!allowRequest(request, reply)) {
       return;
     }
 
-    const parsed = z
-      .object({
-        name: z.string().trim().min(2).max(120),
-        email: z.string().trim().email().max(255),
-        caseId: z.string().trim().min(2).max(80),
-      })
-      .safeParse(request.body);
+    const parsed = sendCaseFileSchema.safeParse(request.body);
 
     if (!parsed.success) {
       return reply.code(400).send({
         error: {
           code: "VALIDATION_ERROR",
-          message:
-            "A valid name, email, and case ID are required.",
+          message: "Please check the recipient email and case ID.",
         },
       });
     }
 
-    const { name, email, caseId } = parsed.data;
+    const { caseId, recipientEmail, recipientName } = parsed.data;
     const caseName = resolveCaseName(caseId);
+    const filePath = resolveCaseFilePath(caseId);
 
-    if (!caseName) {
+    if (!caseName || !filePath) {
       return reply.code(400).send({
         error: {
           code: "INVALID_CASE_ID",
-          message:
-            "That case file is not available.",
+          message: "Unknown case ID.",
         },
       });
     }
 
+    let fileBuffer: Buffer;
+
     try {
-      await sendCaseFileToRequester({
-        to: email,
-        name,
-        caseId,
+      fileBuffer = await readFile(filePath);
+    } catch (error) {
+      request.log.error(
+        { err: error, filePath },
+        "case file PDF missing on disk",
+      );
+
+      return reply.code(500).send({
+        error: {
+          code: "FILE_NOT_FOUND",
+          message: `PDF not found for "${caseName}". Expected it at ${filePath}.`,
+        },
+      });
+    }
+
+    const { html, text } = buildCaseFileDeliveryEmail(
+      caseName,
+      recipientName,
+    );
+
+    try {
+      await resend.emails.send({
+        from: emailFrom,
+        to: recipientEmail,
+        subject: `02Growth — Your case file: ${caseName}`,
+        html,
+        text,
+        attachments: [
+          {
+            filename: `${caseId}.pdf`,
+            content: fileBuffer.toString("base64"),
+          },
+        ],
       });
 
-      return reply.code(200).send({
-        ok: true,
-        caseId,
-        caseName,
-      });
+      request.log.info(
+        { caseId, recipientEmail },
+        "case file delivered",
+      );
+
+      return reply.code(200).send({ ok: true });
     } catch (error) {
       request.log.error(
         { err: error },
-        "case file delivery failed",
+        "case file delivery email failed",
       );
 
       return reply.code(502).send({
         error: {
           code: "EMAIL_FAILED",
-          message:
-            "The proof email could not be sent right now.",
+          message: "The email failed to send. Please try again.",
         },
       });
     }
+  },
+);
+
+// A single token-gated static form — not a dashboard, no accounts, no
+// database. Anyone without the correct ?key= gets a flat 401. The token is
+// echoed into the page only after it has already been validated below, so
+// it never appears anywhere unless the visitor already had it.
+app.get<{ Querystring: { key?: string } }>(
+  "/admin/send-case-file",
+  async (request, reply) => {
+    if (!allowRequest(request, reply)) {
+      return;
+    }
+
+    if (!isValidAdminToken(request.query.key)) {
+      reply.code(401);
+      reply.type("text/plain");
+      return "Not authorized.";
+    }
+
+    const token = request.query.key ?? "";
+    const options = Object.entries(CASE_FILE_ALLOWLIST)
+      .map(
+        ([id, name]) =>
+          `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`,
+      )
+      .join("");
+
+    reply.type("text/html");
+
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Send case file · 02Growth</title>
+  <style>
+    :root {
+      --background:#0A0A0A;
+      --card:#121212;
+      --foreground:#F3EEE3;
+      --muted:#9A9A9A;
+      --primary:#268C28;
+      --primary-foreground:#0A0A0A;
+      --border:rgba(255,255,255,0.10);
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background:var(--background);
+      color:var(--foreground);
+      font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',Helvetica,Arial,sans-serif;
+      padding:24px;
+    }
+    .card {
+      width:100%;
+      max-width:440px;
+      background:var(--card);
+      border:1px solid var(--border);
+      padding:32px;
+    }
+    .eyebrow {
+      font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      font-size:10px;
+      font-weight:700;
+      letter-spacing:1.4px;
+      text-transform:uppercase;
+      color:var(--muted);
+      margin:0 0 8px;
+    }
+    h1 {
+      font-size:20px;
+      font-weight:700;
+      margin:0 0 24px;
+      line-height:1.3;
+    }
+    label {
+      display:block;
+      font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      font-size:10px;
+      font-weight:700;
+      letter-spacing:1px;
+      text-transform:uppercase;
+      color:var(--muted);
+      margin:18px 0 6px;
+    }
+    select, input {
+      width:100%;
+      background:var(--background);
+      border:1px solid var(--border);
+      color:var(--foreground);
+      padding:10px 12px;
+      font-size:14px;
+      font-family:inherit;
+    }
+    select:focus, input:focus { outline:1px solid var(--primary); }
+    button {
+      margin-top:24px;
+      width:100%;
+      background:var(--primary);
+      color:var(--primary-foreground);
+      border:1px solid var(--primary);
+      padding:11px 16px;
+      font-size:12px;
+      font-weight:700;
+      letter-spacing:0.8px;
+      text-transform:uppercase;
+      cursor:pointer;
+    }
+    button:disabled { opacity:0.6; cursor:default; }
+    #status {
+      margin-top:16px;
+      font-size:13px;
+      line-height:1.6;
+      display:none;
+    }
+    #status.ok { color:var(--primary); display:block; }
+    #status.err { color:#e06060; display:block; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <p class="eyebrow">02Growth · Internal</p>
+    <h1>Send a case file</h1>
+
+    <form id="f">
+      <label for="caseId">Case</label>
+      <select id="caseId" required>${options}</select>
+
+      <label for="recipientName">Recipient name</label>
+      <input id="recipientName" type="text" placeholder="Harrison" required>
+
+      <label for="recipientEmail">Recipient email</label>
+      <input id="recipientEmail" type="email" placeholder="name@company.com" required>
+
+      <button type="submit" id="submitBtn">Send case file</button>
+      <div id="status"></div>
+    </form>
+  </div>
+
+  <script>
+    var form = document.getElementById("f");
+    var btn = document.getElementById("submitBtn");
+    var status = document.getElementById("status");
+    var token = ${JSON.stringify(token)};
+
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      btn.disabled = true;
+      btn.textContent = "Sending…";
+      status.className = "";
+      status.textContent = "";
+
+      fetch("/api/admin/send-case-file", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-admin-token": token,
+        },
+        body: JSON.stringify({
+          caseId: document.getElementById("caseId").value,
+          recipientName: document.getElementById("recipientName").value,
+          recipientEmail: document.getElementById("recipientEmail").value,
+        }),
+      })
+        .then(function (res) {
+          return res.json().then(function (data) {
+            return { ok: res.ok, data: data };
+          });
+        })
+        .then(function (result) {
+          if (result.ok) {
+            status.className = "ok";
+            status.textContent = "Sent.";
+            form.reset();
+          } else {
+            status.className = "err";
+            status.textContent =
+              (result.data && result.data.error && result.data.error.message) ||
+              "Something went wrong.";
+          }
+        })
+        .catch(function () {
+          status.className = "err";
+          status.textContent = "Network error. Please try again.";
+        })
+        .finally(function () {
+          btn.disabled = false;
+          btn.textContent = "Send case file";
+        });
+    });
+  </script>
+</body>
+</html>`;
   },
 );
 
