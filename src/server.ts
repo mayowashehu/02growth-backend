@@ -119,9 +119,9 @@ const CASE_FILE_DIR =
   path.join(process.cwd(), "private", "case-files");
 
 const CASE_FILE_PDFS: Record<string, string> = {
-  "ats-funded": "ats-funded.pdf",
-  traderlab: "traderlab.pdf",
-  "unified-proof": "unified-proof.pdf",
+  "ats-funded": "02GrowthLab_ATS-FUNDED.pdf",
+  traderlab: "02GrowthLab_TraderLab.pdf",
+  "unified-proof": "02GrowthLab_Track-Record.pdf",
 };
 
 function resolveCaseFilePath(caseId: string): string | null {
@@ -1429,6 +1429,7 @@ app.post<{ Body: unknown }>(
     const { caseId, recipientEmail, recipientName } = parsed.data;
     const caseName = resolveCaseName(caseId);
     const filePath = resolveCaseFilePath(caseId);
+    console.log(`caseId:${caseId}, caseName:${caseName}, filePath:${filePath}`);    
 
     if (!caseName || !filePath) {
       return reply.code(400).send({
