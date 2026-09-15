@@ -4,6 +4,7 @@ import Fastify, {
 } from "fastify";
 import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
+import { z } from "zod";
 import {
   diagnosisSchema,
   type DiagnosisSubmission,
@@ -65,10 +66,29 @@ const resend = new Resend(resendApiKey);
 const emailFrom =
   "02Growth <hello@02growth.online>";
 
-const adminRecipients = [
+const DEFAULT_ADMIN_EMAILS = [
   "teslimshehu17@gmail.com",
   "teslimnysc17@gmail.com",
 ];
+
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? DEFAULT_ADMIN_EMAILS.join(","))
+  .split(",")
+  .map((email) => email.trim())
+  .filter(Boolean);
+
+const NOTIFICATION_EMAILS = ADMIN_EMAILS.length
+  ? ADMIN_EMAILS
+  : DEFAULT_ADMIN_EMAILS;
+
+const CASE_FILE_ALLOWLIST: Record<string, string> = {
+  "ats-funded": "ATS Funded × 02Growth Lab",
+  traderlab: "TraderLab × 02Growth Lab",
+  "unified-proof": "02Growth Lab — Track Record",
+};
+
+function resolveCaseName(caseId: string): string | null {
+  return CASE_FILE_ALLOWLIST[caseId] ?? null;
+}
 
 const app = Fastify({
   logger: true,
@@ -1016,7 +1036,7 @@ app.post<{ Body: unknown }>(
       [
         resend.emails.send({
           from: emailFrom,
-          to: adminRecipients,
+          to: NOTIFICATION_EMAILS,
           replyTo:
             clientEmail ?? undefined,
           subject: `New diagnosis request — ${submission.project_stage} — ${submission.contact_name}`,
@@ -1062,6 +1082,141 @@ app.post<{ Body: unknown }>(
     return reply.code(201).send({
       ok: true,
     });
+  },
+);
+
+const caseFileAccessSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  email: z.string().trim().email().max(255),
+  xHandle: z
+    .string()
+    .trim()
+    .min(2)
+    .max(120)
+    .refine(
+      (value) => value === "N/A" || /^@?[A-Za-z0-9_]{1,15}$/.test(value),
+      "X handle must be a valid handle or N/A",
+    ),
+  projectCompany: z.string().trim().min(2).max(200),
+  caseId: z.string().trim().min(2).max(80),
+  caseName: z.string().trim().min(2).max(200).optional(),
+  timestamp: z.string().trim().datetime().optional(),
+});
+
+app.post<{ Body: unknown }>(
+  "/api/case-file-access",
+  async (request, reply) => {
+    if (!allowRequest(request, reply)) {
+      return;
+    }
+
+    const parsed =
+      caseFileAccessSchema.safeParse(
+        request.body,
+      );
+
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: {
+          code: "VALIDATION_ERROR",
+          message:
+            "Something went wrong. Please reach out directly on X.",
+        },
+      });
+    }
+
+    const submission = parsed.data;
+    const requestedAt = new Date().toISOString();
+    const caseName = resolveCaseName(submission.caseId);
+
+    if (!caseName) {
+      return reply.code(400).send({
+        error: {
+          code: "INVALID_CASE_ID",
+          message:
+            "Something went wrong. Please reach out directly on X.",
+        },
+      });
+    }
+
+    const emailHtml = emailShell(`
+      <tr>
+        <td
+          style="
+            padding:30px 32px 26px;
+            background:#0b0c0d;
+            border-bottom:3px solid #d9ff45;
+          "
+        >
+          <div
+            style="
+              color:#d9ff45;
+              font-size:10px;
+              line-height:1.5;
+              font-weight:700;
+              letter-spacing:1.8px;
+              text-transform:uppercase;
+            "
+          >
+            02Growth · Case file access
+          </div>
+
+          <div
+            style="
+              margin-top:10px;
+              color:#ffffff;
+              font-size:26px;
+              line-height:1.25;
+              font-weight:700;
+            "
+          >
+            CASE FILE ACCESS REQUEST
+          </div>
+        </td>
+      </tr>
+
+      <tr>
+        <td style="padding:28px 32px 10px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            ${sectionTitle("Request details", "Who wants access")}
+            ${infoRow("Requested case", safe(caseName))}
+            ${infoRow("Name", safe(submission.name))}
+            ${infoRow("Email", safe(submission.email))}
+            ${infoRow("X", safe(submission.xHandle))}
+            ${infoRow("Project / Company", safe(submission.projectCompany))}
+            ${infoRow("Timestamp", safe(requestedAt))}
+          </table>
+        </td>
+      </tr>
+    `);
+
+    try {
+      await resend.emails.send({
+        from: emailFrom,
+        to: NOTIFICATION_EMAILS,
+        subject: `02Growth — Case File Access Request: ${caseName}`,
+        html: emailHtml,
+      });
+
+      return reply.code(201).send({
+        ok: true,
+        caseId: submission.caseId,
+        caseName,
+      });
+    } catch (error) {
+      request.log.error(
+        { err: error },
+        "case file access email delivery failed",
+      );
+
+      return reply.code(502).send({
+        error: {
+          code: "EMAIL_FAILED",
+          message:
+            "Something went wrong. Please reach out directly on X.",
+        },
+      });
+    }
   },
 );
 
