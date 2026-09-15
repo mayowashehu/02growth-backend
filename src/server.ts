@@ -101,6 +101,32 @@ const NOTIFICATION_EMAILS = ADMIN_EMAILS.length
   ? ADMIN_EMAILS
   : DEFAULT_ADMIN_EMAILS;
 
+// Absolute origin this server is reachable at, used to build the "Reply"
+// link embedded in the diagnosis notification email. Falls back to the
+// local dev address; set PUBLIC_BASE_URL in production (e.g. the Render
+// URL — the same one the frontend's DIAGNOSTIC_API_URL points at).
+const PUBLIC_BASE_URL = (
+  process.env.PUBLIC_BASE_URL ?? `http://${host}:${port}`
+).replace(/\/$/, "");
+
+// The two personal sender identities available in the reply-to-diagnosis
+// tool. Each must be a sender address already verified on the 02growth.online
+// domain in Resend — double-check these two match your actual Resend
+// senders and edit them here if not.
+const REPLY_SENDER_IDENTITIES: Record<
+  string,
+  { label: string; from: string }
+> = {
+  mayowa: {
+    label: "Mayowa",
+    from: "Mayowa · 02Growth <mayowa@02growth.online>",
+  },
+  pleasure: {
+    label: "Pleasure",
+    from: "Pleasure · 02Growth <pleasure@02growth.online>",
+  },
+};
+
 const CASE_FILE_ALLOWLIST: Record<string, string> = {
   "ats-funded": "ATS Funded × 02Growth Lab",
   traderlab: "TraderLab × 02Growth Lab",
@@ -402,29 +428,29 @@ function infoRow(
 
 function buildAdminEmail(
   submission: DiagnosisSubmission,
+  submissionId: string,
 ): string {
-  const contactEmail = extractEmail(
-    submission.contact_method,
-  );
+  const replyUrl =
+    `${PUBLIC_BASE_URL}/admin/reply-diagnosis` +
+    `?key=${encodeURIComponent(adminApiToken)}` +
+    `&id=${encodeURIComponent(submissionId)}`;
 
-  const contactAction = contactEmail
-    ? `
-      <a
-        href="mailto:${escapeHtml(contactEmail)}"
-        style="
-          display:inline-block;
-          padding:11px 16px;
-          background:#268C28;
-          color:#0A0A0A;
-          text-decoration:none;
-          font-size:13px;
-          font-weight:700;
-        "
-      >
-        Reply by email
-      </a>
-    `
-    : "";
+  const contactAction = `
+    <a
+      href="${replyUrl}"
+      style="
+        display:inline-block;
+        padding:11px 16px;
+        background:#268C28;
+        color:#0A0A0A;
+        text-decoration:none;
+        font-size:13px;
+        font-weight:700;
+      "
+    >
+      Reply via 02Growth →
+    </a>
+  `;
 
   return emailShell(`
     <tr>
@@ -1036,6 +1062,76 @@ Diagnose before you prescribe.
 }
 
 /* -------------------------------------------------------------------------- */
+/* Diagnosis reply (admin-triggered, personal sender identity)               */
+/* -------------------------------------------------------------------------- */
+
+function buildAdminReplyEmail(
+  contactName: string,
+  senderLabel: string,
+  message: string,
+): { html: string; text: string } {
+  const firstName = contactName.trim().split(/\s+/)[0] || "there";
+
+  const paragraphs = message
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+
+  const htmlParagraphs = paragraphs
+    .map(
+      (paragraph) => `
+        <p style="margin:0 0 18px;color:#D8D2C4;font-size:15px;line-height:1.75;">
+          ${escapeHtml(paragraph).replace(/\n/g, "<br>")}
+        </p>
+      `,
+    )
+    .join("");
+
+  const html = emailShell(`
+    <tr>
+      <td style="padding:30px 32px 26px;background:#0A0A0A;border-bottom:3px solid #268C28;">
+        <div style="color:#268C28;font-size:10px;line-height:1.5;font-weight:700;letter-spacing:1.8px;text-transform:uppercase;font-family:${MONO_STACK};">
+          02Growth
+        </div>
+
+        <div style="margin-top:10px;color:#F3EEE3;font-size:25px;line-height:1.25;font-weight:700;">
+          Following up on your request
+        </div>
+      </td>
+    </tr>
+
+    <tr>
+      <td style="padding:32px;">
+        <p style="margin:0 0 18px;color:#F3EEE3;font-size:15px;line-height:1.7;">
+          Hi ${escapeHtml(firstName)},
+        </p>
+
+        ${htmlParagraphs}
+
+        <div style="padding-top:22px;border-top:1px solid rgba(255,255,255,0.10);">
+          <p style="margin:0;color:#F3EEE3;font-size:14px;line-height:1.65;">
+            ${escapeHtml(senderLabel)} · 02Growth<br>
+            <span style="color:#9A9A9A;font-size:12px;">
+              Diagnose before you prescribe.
+            </span>
+          </p>
+        </div>
+      </td>
+    </tr>
+  `);
+
+  const text = `Hi ${firstName},
+
+${paragraphs.join("\n\n")}
+
+${senderLabel} · 02Growth
+Diagnose before you prescribe.
+02growth.online`;
+
+  return { html, text };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Rate limiting                                                              */
 /* -------------------------------------------------------------------------- */
 
@@ -1154,14 +1250,16 @@ app.post<{ Body: unknown }>(
     const submission: DiagnosisSubmission =
       parsed.data;
 
-    const { error } = await supabase
+    const { data: inserted, error } = await supabase
       .from("diagnosis_inquiries")
       .insert({
         ...submission,
         status: "new",
-      });
+      })
+      .select("id")
+      .single();
 
-    if (error) {
+    if (error || !inserted) {
       request.log.error(
         { err: error },
         "diagnosis inquiry insert failed",
@@ -1176,6 +1274,8 @@ app.post<{ Body: unknown }>(
       });
     }
 
+    const submissionId = inserted.id as string;
+
     const clientEmail = extractEmail(
       submission.contact_method,
     );
@@ -1185,11 +1285,10 @@ app.post<{ Body: unknown }>(
         resend.emails.send({
           from: emailFrom,
           to: NOTIFICATION_EMAILS,
-          replyTo:
-            clientEmail ?? undefined,
           subject: `New diagnosis request — ${submission.project_stage} — ${submission.contact_name}`,
           html: buildAdminEmail(
             submission,
+            submissionId,
           ),
         }),
       ];
@@ -1472,7 +1571,7 @@ app.post<{ Body: unknown }>(
         text,
         attachments: [
           {
-            filename: `${caseId}.pdf`,
+            filename: path.basename(filePath),
             content: fileBuffer.toString("base64"),
           },
         ],
@@ -1613,12 +1712,25 @@ app.get<{ Querystring: { key?: string } }>(
     button:disabled { opacity:0.6; cursor:default; }
     #status {
       margin-top:16px;
+      padding:12px 14px;
       font-size:13px;
-      line-height:1.6;
+      font-weight:700;
+      line-height:1.5;
+      border:1px solid transparent;
       display:none;
     }
-    #status.ok { color:var(--primary); display:block; }
-    #status.err { color:#e06060; display:block; }
+    #status.ok {
+      display:block;
+      color:var(--primary);
+      background:rgba(38,140,40,0.12);
+      border-color:var(--primary);
+    }
+    #status.err {
+      display:block;
+      color:#e06060;
+      background:rgba(224,96,96,0.12);
+      border-color:#e06060;
+    }
   </style>
 </head>
 <body>
@@ -1649,6 +1761,11 @@ app.get<{ Querystring: { key?: string } }>(
 
     form.addEventListener("submit", function (event) {
       event.preventDefault();
+
+      var caseSelect = document.getElementById("caseId");
+      var caseLabel = caseSelect.options[caseSelect.selectedIndex].text;
+      var recipientEmail = document.getElementById("recipientEmail").value;
+
       btn.disabled = true;
       btn.textContent = "Sending…";
       status.className = "";
@@ -1661,9 +1778,9 @@ app.get<{ Querystring: { key?: string } }>(
           "x-admin-token": token,
         },
         body: JSON.stringify({
-          caseId: document.getElementById("caseId").value,
+          caseId: caseSelect.value,
           recipientName: document.getElementById("recipientName").value,
-          recipientEmail: document.getElementById("recipientEmail").value,
+          recipientEmail: recipientEmail,
         }),
       })
         .then(function (res) {
@@ -1674,18 +1791,20 @@ app.get<{ Querystring: { key?: string } }>(
         .then(function (result) {
           if (result.ok) {
             status.className = "ok";
-            status.textContent = "Sent.";
+            status.textContent =
+              "✓ Sent — " + caseLabel + " delivered to " + recipientEmail + ".";
             form.reset();
           } else {
             status.className = "err";
             status.textContent =
-              (result.data && result.data.error && result.data.error.message) ||
-              "Something went wrong.";
+              "✗ Not sent — " +
+              ((result.data && result.data.error && result.data.error.message) ||
+                "something went wrong.");
           }
         })
         .catch(function () {
           status.className = "err";
-          status.textContent = "Network error. Please try again.";
+          status.textContent = "✗ Not sent — network error. Please try again.";
         })
         .finally(function () {
           btn.disabled = false;
@@ -1693,6 +1812,390 @@ app.get<{ Querystring: { key?: string } }>(
         });
     });
   </script>
+</body>
+</html>`;
+  },
+);
+
+/* -------------------------------------------------------------------------- */
+/* Admin: reply to a diagnosis submission under a personal sender identity   */
+/* -------------------------------------------------------------------------- */
+
+const replyDiagnosisBodySchema = z.object({
+  id: z.string().trim().uuid(),
+  sender: z.enum(["mayowa", "pleasure"]),
+  message: z.string().trim().min(1).max(5000),
+});
+
+app.post<{ Body: unknown }>(
+  "/api/admin/reply-diagnosis",
+  async (request, reply) => {
+    if (
+      !checkAdminToken(
+        request,
+        reply,
+        request.headers["x-admin-token"],
+      )
+    ) {
+      return;
+    }
+
+    if (!allowRequest(request, reply)) {
+      return;
+    }
+
+    const parsed = replyDiagnosisBodySchema.safeParse(request.body);
+
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Please check the sender and message fields.",
+        },
+      });
+    }
+
+    const { id, sender, message } = parsed.data;
+    const identity = REPLY_SENDER_IDENTITIES[sender];
+
+    const { data: submission, error } = await supabase
+      .from("diagnosis_inquiries")
+      .select("contact_name, contact_method")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (error || !submission) {
+      return reply.code(404).send({
+        error: {
+          code: "NOT_FOUND",
+          message: "That submission could not be found.",
+        },
+      });
+    }
+
+    const clientEmail = extractEmail(submission.contact_method);
+
+    if (!clientEmail) {
+      return reply.code(400).send({
+        error: {
+          code: "NO_EMAIL",
+          message: `No email address found in "${submission.contact_method}". Reply to them directly using that contact method instead.`,
+        },
+      });
+    }
+
+    const { html, text } = buildAdminReplyEmail(
+      submission.contact_name,
+      identity.label,
+      message,
+    );
+
+    try {
+      await resend.emails.send({
+        from: identity.from,
+        to: clientEmail,
+        subject: "Re: Your 02Growth diagnostic request",
+        html,
+        text,
+      });
+
+      request.log.info(
+        { id, sender },
+        "diagnosis reply sent",
+      );
+
+      return reply.code(200).send({ ok: true });
+    } catch (err) {
+      request.log.error(
+        { err },
+        "diagnosis reply email failed",
+      );
+
+      return reply.code(502).send({
+        error: {
+          code: "EMAIL_FAILED",
+          message: "The reply failed to send. Please try again.",
+        },
+      });
+    }
+  },
+);
+
+// A single token-gated static form, same pattern as /admin/send-case-file
+// above: no accounts, no dashboard, a flat 401 without the correct ?key=.
+app.get<{ Querystring: { key?: string; id?: string } }>(
+  "/admin/reply-diagnosis",
+  async (request, reply) => {
+    if (!allowRequest(request, reply)) {
+      return;
+    }
+
+    if (!isValidAdminToken(request.query.key)) {
+      reply.code(401);
+      reply.type("text/plain");
+      return "Not authorized.";
+    }
+
+    const token = request.query.key ?? "";
+    const submissionId = request.query.id ?? "";
+
+    if (!/^[0-9a-f-]{36}$/i.test(submissionId)) {
+      reply.code(400);
+      reply.type("text/plain");
+      return "Missing or invalid submission id.";
+    }
+
+    const { data: submission, error } = await supabase
+      .from("diagnosis_inquiries")
+      .select("contact_name, contact_role, project_stage, contact_method")
+      .eq("id", submissionId)
+      .maybeSingle();
+
+    if (error || !submission) {
+      reply.code(404);
+      reply.type("text/plain");
+      return "Submission not found.";
+    }
+
+    const clientEmail = extractEmail(submission.contact_method);
+
+    const senderOptions = Object.entries(REPLY_SENDER_IDENTITIES)
+      .map(
+        ([key, identity]) =>
+          `<option value="${escapeHtml(key)}">${escapeHtml(identity.label)}</option>`,
+      )
+      .join("");
+
+    reply.type("text/html");
+
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reply to diagnosis · 02Growth</title>
+  <style>
+    :root {
+      --background:#0A0A0A;
+      --card:#121212;
+      --foreground:#F3EEE3;
+      --muted:#9A9A9A;
+      --primary:#268C28;
+      --primary-foreground:#0A0A0A;
+      --border:rgba(255,255,255,0.10);
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background:var(--background);
+      color:var(--foreground);
+      font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',Helvetica,Arial,sans-serif;
+      padding:24px;
+    }
+    .card {
+      width:100%;
+      max-width:480px;
+      background:var(--card);
+      border:1px solid var(--border);
+      padding:32px;
+    }
+    .eyebrow {
+      font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      font-size:10px;
+      font-weight:700;
+      letter-spacing:1.4px;
+      text-transform:uppercase;
+      color:var(--muted);
+      margin:0 0 8px;
+    }
+    h1 {
+      font-size:20px;
+      font-weight:700;
+      margin:0 0 8px;
+      line-height:1.3;
+    }
+    .replying-to {
+      margin:0 0 24px;
+      font-size:13px;
+      color:var(--muted);
+      line-height:1.6;
+    }
+    .replying-to strong { color:var(--foreground); }
+    label {
+      display:block;
+      font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      font-size:10px;
+      font-weight:700;
+      letter-spacing:1px;
+      text-transform:uppercase;
+      color:var(--muted);
+      margin:18px 0 6px;
+    }
+    select, textarea {
+      width:100%;
+      background:var(--background);
+      border:1px solid var(--border);
+      color:var(--foreground);
+      padding:10px 12px;
+      font-size:14px;
+      font-family:inherit;
+      resize:vertical;
+    }
+    select:focus, textarea:focus { outline:1px solid var(--primary); }
+    button {
+      margin-top:24px;
+      width:100%;
+      background:var(--primary);
+      color:var(--primary-foreground);
+      border:1px solid var(--primary);
+      padding:11px 16px;
+      font-size:12px;
+      font-weight:700;
+      letter-spacing:0.8px;
+      text-transform:uppercase;
+      cursor:pointer;
+    }
+    button:disabled { opacity:0.6; cursor:default; }
+    #status {
+      margin-top:16px;
+      padding:12px 14px;
+      font-size:13px;
+      font-weight:700;
+      line-height:1.5;
+      border:1px solid transparent;
+      display:none;
+    }
+    #status.ok {
+      display:block;
+      color:var(--primary);
+      background:rgba(38,140,40,0.12);
+      border-color:var(--primary);
+    }
+    #status.err {
+      display:block;
+      color:#e06060;
+      background:rgba(224,96,96,0.12);
+      border-color:#e06060;
+    }
+    .no-email {
+      margin-top:20px;
+      padding:14px;
+      font-size:13px;
+      line-height:1.6;
+      color:#e06060;
+      background:rgba(224,96,96,0.12);
+      border:1px solid #e06060;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <p class="eyebrow">02Growth · Internal</p>
+    <h1>Reply to diagnosis submission</h1>
+    <p class="replying-to">
+      Replying to <strong>${safe(submission.contact_name)}</strong>
+      (${safe(submission.contact_role)}, ${safe(submission.project_stage)})
+      ${
+        clientEmail
+          ? `— <strong>${safe(clientEmail)}</strong>`
+          : ""
+      }
+    </p>
+
+    ${
+      clientEmail
+        ? `
+    <form id="f">
+      <label for="sender">Send as</label>
+      <select id="sender" required>${senderOptions}</select>
+
+      <label for="message">Your reply</label>
+      <textarea id="message" rows="8" placeholder="Type your reply — it'll be wrapped in the usual 02Growth email format." required></textarea>
+
+      <button type="submit" id="submitBtn">Send reply</button>
+      <div id="status"></div>
+    </form>
+    `
+        : `
+    <div class="no-email">
+      No email address was found in this submission's contact method
+      (“${safe(submission.contact_method)}”). Reply to them directly
+      using that contact method instead — this tool can only send
+      through Resend to a real email address.
+    </div>
+    `
+    }
+  </div>
+
+  ${
+    clientEmail
+      ? `
+  <script>
+    var form = document.getElementById("f");
+    var btn = document.getElementById("submitBtn");
+    var status = document.getElementById("status");
+    var token = ${JSON.stringify(token)};
+    var submissionId = ${JSON.stringify(submissionId)};
+
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+
+      var senderSelect = document.getElementById("sender");
+      var senderLabel = senderSelect.options[senderSelect.selectedIndex].text;
+      var messageBox = document.getElementById("message");
+
+      btn.disabled = true;
+      btn.textContent = "Sending…";
+      status.className = "";
+      status.textContent = "";
+
+      fetch("/api/admin/reply-diagnosis", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-admin-token": token,
+        },
+        body: JSON.stringify({
+          id: submissionId,
+          sender: senderSelect.value,
+          message: messageBox.value,
+        }),
+      })
+        .then(function (res) {
+          return res.json().then(function (data) {
+            return { ok: res.ok, data: data };
+          });
+        })
+        .then(function (result) {
+          if (result.ok) {
+            status.className = "ok";
+            status.textContent = "✓ Sent — reply delivered as " + senderLabel + ".";
+            messageBox.value = "";
+          } else {
+            status.className = "err";
+            status.textContent =
+              "✗ Not sent — " +
+              ((result.data && result.data.error && result.data.error.message) ||
+                "something went wrong.");
+          }
+        })
+        .catch(function () {
+          status.className = "err";
+          status.textContent = "✗ Not sent — network error. Please try again.";
+        })
+        .finally(function () {
+          btn.disabled = false;
+          btn.textContent = "Send reply";
+        });
+    });
+  </script>
+  `
+      : ""
+  }
 </body>
 </html>`;
   },
